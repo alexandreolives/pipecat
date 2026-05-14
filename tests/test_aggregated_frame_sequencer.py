@@ -505,5 +505,108 @@ class TestClear(unittest.TestCase):
         self.assertEqual(result[0].text, "hello")
 
 
+# ---------------------------------------------------------------------------
+# CJK languages — Korean, Japanese, Chinese
+# ---------------------------------------------------------------------------
+
+
+class TestCJKLanguages(unittest.TestCase):
+    """Sequencer behaviour for CJK language scenarios.
+
+    Korean: Cartesia returns each word as a separate timestamp event (one word
+    per process_word call).  Japanese/Chinese: Cartesia merges all characters
+    in one timestamp message into a single combined token before calling
+    process_word.
+    """
+
+    # --- Korean ---
+
+    def test_korean_word_by_word_completes_slot_and_flushes_skipped(self):
+        """Korean words fed one at a time complete the spoken slot and unblock a skipped frame."""
+        seq = _seq()
+        sentence = "저는 여러분의 AI 어시스턴트입니다."
+        words = ["저는", "여러분의", "AI", "어시스턴트입니다."]
+        seq.register_spoken(_spoken_frame(sentence), "ctx1", _tracker(sentence), True)
+        skipped = _skipped_frame("[code]")
+        seq.register_skipped(skipped, "ctx2", None)
+
+        # Skipped stays blocked until the last word arrives
+        for word in words[:-1]:
+            partial = seq.process_word(word, pts=100, context_id="ctx1")
+            self.assertFalse(any(f is skipped for f in partial))
+
+        result = seq.process_word(words[-1], pts=200, context_id="ctx1")
+        self.assertTrue(any(f is skipped for f in result))
+
+    def test_korean_force_complete_emits_correct_remaining_text(self):
+        """After one Korean word, force_complete emits the correct unspoken suffix."""
+        seq = _seq()
+        sentence = "저는 여러분의 AI 어시스턴트입니다."
+        seq.register_spoken(_spoken_frame(sentence), "ctx1", _tracker(sentence), True)
+        seq.process_word("저는", pts=10, context_id="ctx1")
+
+        result = seq.force_complete(last_word_pts=50)
+        tts_frames = [f for f in result if isinstance(f, TTSTextFrame)]
+        self.assertEqual(len(tts_frames), 1)
+        self.assertEqual(tts_frames[0].text, "여러분의 AI 어시스턴트입니다.")
+        self.assertEqual(tts_frames[0].pts, 50)
+
+    # --- Japanese ---
+
+    def test_japanese_combined_groups_complete_spoken_slot(self):
+        """Two Cartesia-style combined Japanese groups complete the slot and flush skipped."""
+        seq = _seq()
+        sentence = "こんにちは、私はあなたの"
+        seq.register_spoken(_spoken_frame(sentence), "ctx1", _tracker(sentence), True)
+        skipped = _skipped_frame("[skipped]")
+        seq.register_skipped(skipped, "ctx2", None)
+
+        r1 = seq.process_word("こんにちは、私", pts=100, context_id="ctx1")
+        self.assertFalse(any(f is skipped for f in r1))
+
+        r2 = seq.process_word("はあなたの", pts=200, context_id="ctx1")
+        self.assertTrue(any(f is skipped for f in r2))
+
+    def test_japanese_force_complete_emits_remaining_chars(self):
+        """After the first Japanese combined group, force_complete emits the rest."""
+        seq = _seq()
+        sentence = "こんにちは、私はあなたの"
+        seq.register_spoken(_spoken_frame(sentence), "ctx1", _tracker(sentence), True)
+        seq.process_word("こんにちは、私", pts=10, context_id="ctx1")
+
+        result = seq.force_complete(last_word_pts=50)
+        tts_frames = [f for f in result if isinstance(f, TTSTextFrame)]
+        self.assertEqual(len(tts_frames), 1)
+        self.assertEqual(tts_frames[0].text, "はあなたの")
+
+    # --- Chinese ---
+
+    def test_chinese_combined_groups_complete_spoken_slot(self):
+        """Two Cartesia-style combined Chinese groups complete the slot and flush skipped."""
+        seq = _seq()
+        sentence = "你好，我是你的智能"
+        seq.register_spoken(_spoken_frame(sentence), "ctx1", _tracker(sentence), True)
+        skipped = _skipped_frame("[skipped]")
+        seq.register_skipped(skipped, "ctx2", None)
+
+        r1 = seq.process_word("你好，我是", pts=100, context_id="ctx1")
+        self.assertFalse(any(f is skipped for f in r1))
+
+        r2 = seq.process_word("你的智能", pts=200, context_id="ctx1")
+        self.assertTrue(any(f is skipped for f in r2))
+
+    def test_chinese_force_complete_emits_remaining_chars(self):
+        """After the first Chinese combined group, force_complete emits the rest."""
+        seq = _seq()
+        sentence = "你好，我是你的智能"
+        seq.register_spoken(_spoken_frame(sentence), "ctx1", _tracker(sentence), True)
+        seq.process_word("你好，我是", pts=10, context_id="ctx1")
+
+        result = seq.force_complete(last_word_pts=50)
+        tts_frames = [f for f in result if isinstance(f, TTSTextFrame)]
+        self.assertEqual(len(tts_frames), 1)
+        self.assertEqual(tts_frames[0].text, "你的智能")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -90,13 +90,48 @@ class WordCompletionTracker:
 
     @staticmethod
     def _normalize(text: str) -> str:
-        """Strip XML/HTML tags then keep only lowercase alphanumeric characters."""
+        """Strip XML/HTML tags then keep only lowercase alphanumeric characters.
+
+        Accented letters (e.g. ã, é) are reduced to their base letter so TTS output
+        can be matched against LLM text even when the provider strips diacritics.
+        Non-Latin scripts (CJK, Hangul) are kept as-is — each original character
+        contributes exactly one char to the result, keeping normalized length in sync
+        with raw alnum counts used by _advance_by_alnums.
+        """
         text = re.sub(r"<[^>]+>", "", text)
-        # Decompose accents (ā → a + ̄)
-        text = unicodedata.normalize("NFKD", text)
-        # Keep base characters only
-        text = "".join(c for c in text if c.isalnum())
-        return text.lower()
+        result = []
+        for char in text:
+            # Ignore punctuation, spaces, emojis, etc.
+            # Keep only letters and numbers.
+            if not char.isalnum():
+                continue
+            # NFD decomposes accented characters into:
+            #   é -> e + ◌́
+            #   ã -> a + ◌̃
+            #
+            # Non-accented characters usually stay unchanged.
+            nfd = unicodedata.normalize("NFD", char)
+            # Unicode category "Mn" means:
+            #   Mark, Nonspacing
+            #
+            # These are combining accent marks that modify
+            # the previous character but are not standalone.
+            #
+            # Example:
+            #   "é" becomes:
+            #       nfd[0] = "e"
+            #       nfd[1] = "◌́"  (category = "Mn")
+            #
+            # If the second character is a combining accent,
+            # keep only the base letter.
+            if len(nfd) >= 2 and unicodedata.category(nfd[1]) == "Mn":
+                # Accented letter: keep the base character only (drops the combining mark).
+                result.append(nfd[0].lower())
+            else:
+                # Regular ASCII, numbers, CJK, Hangul, etc.
+                # are kept unchanged (except lowercase conversion).
+                result.append(char.lower())
+        return "".join(result)
 
     # Typographic variants that LLMs commonly emit but TTS services normalize away.
     _TYPOGRAPHY_FOLD = str.maketrans(

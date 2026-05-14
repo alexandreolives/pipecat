@@ -1480,5 +1480,123 @@ class TestWordCompletionTrackerUnicodeSymbolSubstitution(unittest.TestCase):
         self.assertTrue(tracker.add_word_and_check_complete(self.ELEVENLABS_WORDS[-1]))
 
 
+class TestWordCompletionTrackerCJK(unittest.TestCase):
+    """Completion tracking for CJK scripts: Korean, Japanese, and Chinese.
+
+    Korean words are fed one at a time (Cartesia returns each Hangul word as a
+    separate timestamp event). Japanese and Chinese characters are fed as
+    combined groups (Cartesia merges all chars in one timestamp message into a
+    single token before calling add_word_timestamps).
+    """
+
+    # --- Korean ---
+
+    def test_korean_word_by_word_completion(self):
+        """Korean words fed one at a time complete the tracker correctly."""
+        sentence = "저는 여러분의 AI 어시스턴트입니다."
+        words = ["저는", "여러분의", "AI", "어시스턴트입니다."]
+        tracker = WordCompletionTracker(sentence)
+        for word in words[:-1]:
+            self.assertFalse(tracker.add_word_and_check_complete(word))
+        self.assertTrue(tracker.add_word_and_check_complete(words[-1]))
+
+    def test_korean_normalized_char_count_matches_raw_alnum(self):
+        """Each Hangul syllable must normalize to exactly one char.
+
+        The NFKD decomposition would expand each syllable into 2-3 conjoining
+        jamo, making the normalized length much larger than the raw alnum count
+        and breaking the _advance_by_alnums cursor.  NFD-per-char normalization
+        must keep each syllable as a single character.
+        """
+        samples = ["저는여러분의", "안녕하세요", "어시스턴트"]
+        for text in samples:
+            raw_count = sum(1 for c in text if c.isalnum())
+            norm_count = len(WordCompletionTracker._normalize(text))
+            self.assertEqual(
+                norm_count,
+                raw_count,
+                f"_normalize({text!r}): got {norm_count} chars, want {raw_count}",
+            )
+
+    def test_korean_force_complete_remaining_text_is_correct(self):
+        """After the first Korean word the TTS cursor is at the right position.
+
+        get_remaining_tts_text() must return the unspoken suffix verbatim so
+        force_complete can emit a correct TTSTextFrame for it.
+        """
+        sentence = "저는 여러분의 AI 어시스턴트입니다."
+        tracker = WordCompletionTracker(sentence)
+        tracker.add_word_and_check_complete("저는")
+        self.assertEqual(tracker.get_remaining_tts_text(), "여러분의 AI 어시스턴트입니다.")
+
+    def test_korean_mixed_with_latin(self):
+        """Latin tokens (e.g. 'AI') embedded in Korean text are handled correctly."""
+        sentence = "AI 어시스턴트입니다."
+        tracker = WordCompletionTracker(sentence)
+        self.assertFalse(tracker.add_word_and_check_complete("AI"))
+        self.assertTrue(tracker.add_word_and_check_complete("어시스턴트입니다."))
+
+    def test_korean_word_belongs_here(self):
+        """word_belongs_here distinguishes Korean words based on remaining content."""
+        tracker = WordCompletionTracker("저는 여러분의")
+        self.assertTrue(tracker.word_belongs_here("저는"))
+        # "여러분의" starts with chars that follow "저는", so before consuming
+        # "저는" the next word doesn't belong here yet.
+        self.assertFalse(tracker.word_belongs_here("여러분의"))
+
+        tracker.add_word_and_check_complete("저는")
+        self.assertTrue(tracker.word_belongs_here("여러분의"))
+
+    # --- Japanese ---
+
+    def test_japanese_single_combined_group_completes(self):
+        """A single Cartesia-style combined group (all chars merged) completes the frame."""
+        # Cartesia merges ["こ","ん","に","ち","は","。"] into "こんにちは。"
+        tracker = WordCompletionTracker("こんにちは。")
+        self.assertTrue(tracker.add_word_and_check_complete("こんにちは。"))
+
+    def test_japanese_multiple_groups_for_one_frame(self):
+        """Two Cartesia timestamp groups for one Japanese frame complete in sequence."""
+        sentence = "こんにちは、私はあなたの"
+        tracker = WordCompletionTracker(sentence)
+        self.assertFalse(tracker.add_word_and_check_complete("こんにちは、私"))
+        self.assertTrue(tracker.add_word_and_check_complete("はあなたの"))
+
+    def test_japanese_force_complete_remaining_text(self):
+        """After the first Japanese group the cursor sits at the right position."""
+        sentence = "こんにちは、私はあなたの"
+        tracker = WordCompletionTracker(sentence)
+        tracker.add_word_and_check_complete("こんにちは、私")
+        self.assertEqual(tracker.get_remaining_tts_text(), "はあなたの")
+
+    def test_japanese_punctuation_not_counted_toward_completion(self):
+        """Japanese punctuation (。、) is not alphanumeric and must not block completion."""
+        tracker = WordCompletionTracker("こんにちは。")
+        # "こんにちは" covers all 5 alnum chars; "。" adds 0.
+        self.assertTrue(tracker.add_word_and_check_complete("こんにちは。"))
+
+    # --- Chinese ---
+
+    def test_chinese_single_combined_group_completes(self):
+        """A single Cartesia-style combined Chinese group completes the frame."""
+        # Cartesia merges ["你","好","，","我","是"] into "你好，我是"
+        tracker = WordCompletionTracker("你好，我是")
+        self.assertTrue(tracker.add_word_and_check_complete("你好，我是"))
+
+    def test_chinese_multiple_groups_for_one_frame(self):
+        """Two Cartesia timestamp groups for one Chinese frame complete in sequence."""
+        sentence = "你好，我是你的智能"
+        tracker = WordCompletionTracker(sentence)
+        self.assertFalse(tracker.add_word_and_check_complete("你好，我是"))
+        self.assertTrue(tracker.add_word_and_check_complete("你的智能"))
+
+    def test_chinese_force_complete_remaining_text(self):
+        """After the first Chinese group the cursor sits at the right position."""
+        sentence = "你好，我是你的智能"
+        tracker = WordCompletionTracker(sentence)
+        tracker.add_word_and_check_complete("你好，我是")
+        self.assertEqual(tracker.get_remaining_tts_text(), "你的智能")
+
+
 if __name__ == "__main__":
     unittest.main()
