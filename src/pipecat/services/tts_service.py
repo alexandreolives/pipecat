@@ -50,6 +50,7 @@ from pipecat.services.ai_service import AIService
 from pipecat.services.settings import TTSSettings, is_given
 from pipecat.services.websocket_service import WebsocketService
 from pipecat.transcriptions.language import Language
+from pipecat.utils.frame_queue import FrameQueue
 from pipecat.utils.context.aggregated_frame_sequencer import AggregatedFrameSequencer
 from pipecat.utils.context.word_completion_tracker import WordCompletionTracker
 from pipecat.utils.text.base_text_filter import BaseTextFilter
@@ -338,6 +339,20 @@ class TTSService(AIService):
         self._audio_contexts: dict[str, asyncio.Queue] = {}
         self._audio_context_task: asyncio.Task | None = None
 
+        # Single FIFO queue that serializes everything the TTS service emits downstream.
+        # Items can be:
+        #   str   – an audio context ID: process the per-context audio queue in full before
+        #           moving on (see _handle_audio_context).
+        #   Frame – a non-system downstream frame (e.g. AggregatedTextFrame, FooFrame) that
+        #           must be emitted in-order relative to surrounding audio contexts.
+        #   None  – shutdown sentinel (sent by stop()).
+        # Created once here so it survives interruptions: on interruption we call reset()
+        # which drops non-UninterruptibleFrame items while keeping uninterruptible ones
+        # (e.g. FunctionCallResultFrame) that must not be lost mid-flight.
+        self._serialization_queue: FrameQueue = FrameQueue(
+            frame_getter=lambda item: item if isinstance(item, Frame) else None
+        )
+
         self._register_event_handler("on_connected")
         self._register_event_handler("on_disconnected")
         self._register_event_handler("on_connection_error")
@@ -480,7 +495,10 @@ class TTSService(AIService):
             language: The language to convert.
 
         Returns:
-            The service-specific language identifier, or None if not supported.
+            The service-specific language identifier. Return ``None`` to
+            indicate an unsupported language. This optional return is an
+            extension hook for future or third-party subclasses; as of
+            2026-04-28, first-party services return a string.
         """
         return Language(language)
 
@@ -622,8 +640,10 @@ class TTSService(AIService):
         """Handle the completion of a turn."""
         # For HTTP services they emit the frames synchronously, so close the audio context here
         # once all frames (including TTSTextFrame above) have been enqueued.
-        if self._is_yielding_frames_synchronously and self.audio_context_available(
-            self._turn_context_id
+        if (
+            self._is_yielding_frames_synchronously
+            and self._turn_context_id is not None
+            and self.audio_context_available(self._turn_context_id)
         ):
             if self._push_stop_frames:
                 await self.append_to_audio_context(
@@ -787,7 +807,17 @@ class TTSService(AIService):
         if isinstance(frame, TTSStoppedFrame) and frame.context_id:
             if frame.context_id in self._tts_contexts:
                 if self._tts_contexts[frame.context_id].push_assistant_aggregation:
-                    await self.push_frame(LLMAssistantPushAggregationFrame())
+                    aggregation_frame = LLMAssistantPushAggregationFrame()
+                    # When word-level TTSTextFrames are routed through the
+                    # transport's clock queue (PTS-based), the aggregation frame
+                    # would otherwise take the audio (sync) queue path and
+                    # could overtake the final word frames. Stamping it with a
+                    # PTS just past the last word forces it through the clock
+                    # queue too, so the assistant aggregator sees every word
+                    # before flushing.
+                    if self._word_last_pts:
+                        aggregation_frame.pts = self._word_last_pts + 1
+                    await self.push_frame(aggregation_frame)
                 logger.debug(f"{self} cleaning up TTS context {frame.context_id}")
                 del self._tts_contexts[frame.context_id]
 
@@ -882,6 +912,9 @@ class TTSService(AIService):
         await self.reset_word_timestamps()
 
         await self._stop_audio_context_task()
+        # Drops non-UninterruptibleFrame items while keeping uninterruptible ones
+        # (e.g. FunctionCallResultFrame) that must not be lost mid-flight.
+        self._serialization_queue.reset()
         audio_contexts = self.get_audio_contexts()
         if audio_contexts:
             for ctx_id in audio_contexts:
@@ -890,6 +923,16 @@ class TTSService(AIService):
         self._turn_context_id = None
         self._word_last_pts = 0
         self._create_audio_context_task()
+        # When pause_frame_processing=True, the process task may be blocked at
+        # __process_event.wait() because pause_processing_frames() was called
+        # after LLMFullResponseEndFrame and an UninterruptibleFrame was dequeued
+        # before the interrupt arrived. _start_interruption() in the base class
+        # handles the common case (non-uninterruptible frames) by cancelling and
+        # recreating the process task. But when _start_interruption() detects an
+        # UninterruptibleFrame it only resets the queue, leaving the process task
+        # blocked. BotStoppedSpeakingFrame never arrives (no audio played), so we
+        # must resume here to prevent a permanent deadlock.
+        await self._maybe_resume_frame_processing()
 
     async def _maybe_pause_frame_processing(self):
         if self._processing_text and self._pause_frame_processing:
@@ -1218,16 +1261,18 @@ class TTSService(AIService):
         logger.trace(f"{self} created audio context {context_id}")
 
     async def append_to_audio_context(
-        self, context_id: str, frame: Frame | _WordTimestampEntry | None
+        self, context_id: str | None, frame: Frame | _WordTimestampEntry | None
     ):
         """Append a frame or word-timestamp entry to an existing audio context queue.
 
-        Passing ``None`` signals end-of-context (used by remove_audio_context to mark
-        the queue for deletion). If the context no longer exists but the context_id
+        Passing a ``frame`` of ``None`` signals end-of-context (used by remove_audio_context
+        to mark the queue for deletion). If the context no longer exists but the context_id
         matches the active turn, the context is transparently recreated before appending.
 
         Args:
-            context_id: The context to append to.
+            context_id: The context to append to. ``None`` is accepted as a no-op
+                (with a debug log) so callers can pass through values from
+                ``get_active_audio_context_id()`` without an explicit guard.
             frame: The frame, word-timestamp entry, or ``None`` (end-of-context sentinel)
                 to append.
         """
@@ -1248,12 +1293,17 @@ class TTSService(AIService):
         else:
             logger.debug(f"{self} unable to append audio to context {context_id}")
 
-    async def remove_audio_context(self, context_id: str):
+    async def remove_audio_context(self, context_id: str | None):
         """Remove an existing audio context.
 
         Args:
-            context_id: The context to remove.
+            context_id: The context to remove. ``None`` is accepted as a
+                no-op (logged) so callers can pass through values from
+                ``get_active_audio_context_id()`` without an explicit guard.
         """
+        if not context_id:
+            logger.debug(f"{self} unable to remove audio context: no context ID provided")
+            return
         if self.audio_context_available(context_id):
             # We just mark the audio context for deletion by appending
             # None. Once we reach None while handling audio we know we can
@@ -1313,14 +1363,6 @@ class TTSService(AIService):
 
     def _create_audio_context_task(self):
         if not self._audio_context_task:
-            # Single FIFO queue that serializes everything the TTS service emits downstream.
-            # Items can be:
-            #   str   – an audio context ID: process the per-context audio queue in full before
-            #           moving on (see _handle_audio_context).
-            #   Frame – a non-system downstream frame (e.g. AggregatedTextFrame, FooFrame) that
-            #           must be emitted in-order relative to surrounding audio contexts.
-            #   None  – shutdown sentinel (sent by stop()).
-            self._serialization_queue: asyncio.Queue = asyncio.Queue()
             self._audio_contexts: dict[str, asyncio.Queue] = {}
             self._audio_context_task = self.create_task(self._audio_context_task_handler())
 
