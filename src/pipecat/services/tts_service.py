@@ -50,9 +50,9 @@ from pipecat.services.ai_service import AIService
 from pipecat.services.settings import TTSSettings, is_given
 from pipecat.services.websocket_service import WebsocketService
 from pipecat.transcriptions.language import Language
-from pipecat.utils.frame_queue import FrameQueue
 from pipecat.utils.context.aggregated_frame_sequencer import AggregatedFrameSequencer
 from pipecat.utils.context.word_completion_tracker import WordCompletionTracker
+from pipecat.utils.frame_queue import FrameQueue
 from pipecat.utils.text.base_text_filter import BaseTextFilter
 from pipecat.utils.text.pattern_pair_aggregator import PatternMatch
 from pipecat.utils.text.simple_text_aggregator import SimpleTextAggregator
