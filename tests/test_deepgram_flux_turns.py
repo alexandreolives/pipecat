@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from pipecat.frames.frames import (
+    InterimTranscriptionFrame,
     TranscriptionFrame,
     UserStoppedSpeakingFrame,
     UserTurnInferenceCompletedFrame,
@@ -74,6 +75,19 @@ async def test_eager_end_of_turn_emits_provisional_transcript_and_inference_trig
     assert isinstance(second_call, UserTurnInferenceTriggeredFrame)
 
     service._call_event_handler.assert_awaited_once_with("on_eager_end_of_turn", "hello there")
+
+
+@pytest.mark.asyncio
+async def test_update_event_emits_interim_transcription():
+    service = _make_service()
+
+    await service._handle_update("hello there", {"type": "TurnInfo", "event": "Update"})
+
+    assert service.push_frame.await_count == 1
+    frame = service.push_frame.await_args_list[0].args[0]
+    assert isinstance(frame, InterimTranscriptionFrame)
+    assert frame.text == "hello there"
+    service._call_event_handler.assert_awaited_once_with("on_update", "hello there")
 
 
 @pytest.mark.asyncio

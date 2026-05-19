@@ -19,6 +19,7 @@ from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
@@ -573,7 +574,7 @@ class DeepgramFluxSTTBase(STTService):
             case FluxEventType.EAGER_END_OF_TURN:
                 await self._handle_eager_end_of_turn(transcript, data)
             case FluxEventType.UPDATE:
-                await self._handle_update(transcript)
+                await self._handle_update(transcript, data)
 
     async def _handle_start_of_turn(self, transcript: str):
         """Handle StartOfTurn events from Deepgram Flux.
@@ -756,7 +757,7 @@ class DeepgramFluxSTTBase(STTService):
             )
         await self._call_event_handler("on_eager_end_of_turn", transcript)
 
-    async def _handle_update(self, transcript: str):
+    async def _handle_update(self, transcript: str, data: dict[str, Any]):
         """Handle Update events from Deepgram Flux.
 
         Update events provide incremental transcript updates during an ongoing
@@ -769,10 +770,15 @@ class DeepgramFluxSTTBase(STTService):
         """
         if transcript:
             logger.trace(f"Update event: {transcript}")
-            # TTFB (Time To First Byte) metrics are currently disabled for Deepgram Flux.
-            # Ideally, TTFB should measure the time from when a user starts speaking
-            # until we receive the first transcript. However, Deepgram Flux delivers
-            # both the "user started speaking" event and the first transcript simultaneously,
-            # making this timing measurement meaningless in this context.
-            # await self.stop_ttfb_metrics()
+            # Surface incremental transcripts so the UI can show the user's speech
+            # before Flux reaches EagerEndOfTurn / EndOfTurn.
+            await self.push_frame(
+                InterimTranscriptionFrame(
+                    transcript,
+                    self._user_id,
+                    time_now_iso8601(),
+                    self._primary_detected_language(data),
+                    result=data,
+                )
+            )
             await self._call_event_handler("on_update", transcript)
