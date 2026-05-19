@@ -255,6 +255,26 @@ async def test_voice_settings_are_sent_only_once_per_websocket_session():
     assert "voice_settings" not in init_messages[1]
 
 
+def test_keepalive_is_suppressed_until_session_initializes():
+    service = ElevenLabsTTSService(
+        api_key="test-key",
+        settings=ElevenLabsTTSService.Settings(
+            voice="voice-id",
+            model="eleven_turbo_v2_5",
+        ),
+    )
+    service._websocket_session_initialized = False
+    service.get_active_audio_context_id = lambda: "ctx-1"
+
+    assert service._build_keepalive_message() is None
+
+    service._websocket_session_initialized = True
+    assert service._build_keepalive_message() == {"text": "", "context_id": "ctx-1"}
+
+    service.get_active_audio_context_id = lambda: None
+    assert service._build_keepalive_message() is None
+
+
 @pytest.mark.asyncio
 async def test_disconnect_resets_voice_settings_session_marker():
     service = ElevenLabsTTSService(
@@ -272,10 +292,12 @@ async def test_disconnect_resets_voice_settings_session_marker():
     service.stop_all_metrics = AsyncMock()
     service.remove_active_audio_context = AsyncMock()
     service._call_event_handler = AsyncMock()
+    service._websocket_session_initialized = True
 
     await service._disconnect_websocket()
 
     assert service._voice_settings_sent is False
+    assert service._websocket_session_initialized is False
     assert service._websocket is None
 
 

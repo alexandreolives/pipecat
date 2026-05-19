@@ -587,6 +587,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
         self._voice_settings_sent = False
+        self._websocket_session_initialized = False
         self._pronunciation_dictionary_locators = _pronunciation_dictionary_locators
 
         self._cumulative_time = 0
@@ -791,6 +792,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
             await self.remove_active_audio_context()
             self._websocket = None
             self._voice_settings_sent = False
+            self._websocket_session_initialized = False
             await self._call_event_handler("on_disconnected")
 
     def _get_websocket(self):
@@ -907,6 +909,17 @@ class ElevenLabsTTSService(WebsocketTTSService):
                             "_receive_messages: using fallback timing method - consider investigating alignment data structure"
                         )
 
+    def _build_keepalive_message(self) -> dict[str, str] | None:
+        """Build a keepalive message only after ElevenLabs session initialization."""
+        if not self._websocket_session_initialized:
+            return None
+
+        context_id = self.get_active_audio_context_id()
+        if not context_id:
+            return None
+
+        return {"text": "", "context_id": context_id}
+
     async def _keepalive_task_handler(self):
         """Send periodic keepalive messages to maintain WebSocket connection."""
         KEEPALIVE_SLEEP = 10
@@ -914,20 +927,16 @@ class ElevenLabsTTSService(WebsocketTTSService):
             await asyncio.sleep(KEEPALIVE_SLEEP)
             try:
                 if self._websocket and self._websocket.state is State.OPEN:
-                    context_id = self.get_active_audio_context_id()
-                    if context_id:
-                        # Send keepalive with context ID to keep the connection alive
-                        keepalive_message = {
-                            "text": "",
-                            "context_id": context_id,
-                        }
-                        logger.trace(f"Sending keepalive for context {context_id}")
-                    else:
-                        # It's possible to have a user interruption which clears the context
-                        # without generating a new TTS response. In this case, we'll just send
-                        # an empty message to keep the connection alive.
-                        keepalive_message = {"text": ""}
-                        logger.trace("Sending keepalive without context")
+                    keepalive_message = self._build_keepalive_message()
+                    if keepalive_message is None:
+                        logger.trace(
+                            f"{self}: skipping keepalive before ElevenLabs session initialization "
+                            f"or without an active audio context"
+                        )
+                        continue
+                    logger.trace(
+                        f"Sending keepalive for context {keepalive_message['context_id']}"
+                    )
                     await self._websocket.send(json.dumps(keepalive_message))
             except websockets.ConnectionClosed as e:
                 logger.warning(f"{self} keepalive error: {e}")
@@ -981,6 +990,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
                             for locator in self._pronunciation_dictionary_locators
                         ]
                     await self._websocket.send(json.dumps(msg))
+                    self._websocket_session_initialized = True
                     logger.trace(f"Created new context {context_id}")
 
                 await self._send_text(text, context_id)
