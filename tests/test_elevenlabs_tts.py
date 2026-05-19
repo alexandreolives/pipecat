@@ -4,11 +4,17 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Tests for ElevenLabs TTS alignment handling."""
+"""Tests for ElevenLabs TTS alignment and session handling."""
 
+import json
 from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+from websockets.protocol import State
 
 from pipecat.services.elevenlabs.tts import (
+    ElevenLabsTTSService,
     _select_alignment,
     _strip_utterance_leading_spaces,
     calculate_word_times,
@@ -57,6 +63,22 @@ def _words_from_chunks(chunks: list[dict[str, list[Any]]]) -> list[str]:
         word_times.append((partial_word, partial_word_start_time))
 
     return [word for word, _ in word_times]
+
+
+class _FakeWebSocket:
+    def __init__(self):
+        self.state = State.OPEN
+        self.sent_messages: list[dict[str, Any]] = []
+
+    async def send(self, message: str):
+        self.sent_messages.append(json.loads(message))
+
+    async def close(self):
+        self.state = State.CLOSED
+
+
+async def _noop(*args, **kwargs):
+    return None
 
 
 def test_elevenlabs_flash_alignment_preserves_inter_word_chunk_space():
@@ -200,3 +222,79 @@ def test_select_alignment_works_with_http_field_names():
     )
     assert selected is not None
     assert selected["characters"] == list(" Hi")
+
+
+@pytest.mark.asyncio
+async def test_voice_settings_are_sent_only_once_per_websocket_session():
+    service = ElevenLabsTTSService(
+        api_key="test-key",
+        settings=ElevenLabsTTSService.Settings(
+            voice="voice-id",
+            model="eleven_turbo_v2_5",
+            stability=0.7,
+            similarity_boost=0.8,
+            speed=1.1,
+        ),
+    )
+    service._websocket = _FakeWebSocket()
+    service.start_ttfb_metrics = _noop
+    service.start_tts_usage_metrics = _noop
+
+    async for _ in service.run_tts("hello there", "ctx-1"):
+        pass
+    async for _ in service.run_tts("hello again", "ctx-2"):
+        pass
+
+    init_messages = [msg for msg in service._websocket.sent_messages if msg["text"] == " "]
+    assert len(init_messages) == 2
+    assert init_messages[0]["voice_settings"] == {
+        "stability": 0.7,
+        "similarity_boost": 0.8,
+        "speed": 1.1,
+    }
+    assert "voice_settings" not in init_messages[1]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_resets_voice_settings_session_marker():
+    service = ElevenLabsTTSService(
+        api_key="test-key",
+        settings=ElevenLabsTTSService.Settings(
+            voice="voice-id",
+            model="eleven_turbo_v2_5",
+            stability=0.7,
+            similarity_boost=0.8,
+            speed=1.1,
+        ),
+    )
+    service._websocket = _FakeWebSocket()
+    service._voice_settings_sent = True
+    service.stop_all_metrics = AsyncMock()
+    service.remove_active_audio_context = AsyncMock()
+    service._call_event_handler = AsyncMock()
+
+    await service._disconnect_websocket()
+
+    assert service._voice_settings_sent is False
+    assert service._websocket is None
+
+
+@pytest.mark.asyncio
+async def test_voice_settings_update_forces_reconnect():
+    service = ElevenLabsTTSService(
+        api_key="test-key",
+        settings=ElevenLabsTTSService.Settings(
+            voice="voice-id",
+            model="eleven_turbo_v2_5",
+            stability=0.7,
+            similarity_boost=0.8,
+            speed=1.1,
+        ),
+    )
+    service._disconnect = AsyncMock()
+    service._connect = AsyncMock()
+
+    await service._update_settings(ElevenLabsTTSService.Settings(speed=0.9))
+
+    service._disconnect.assert_awaited_once()
+    service._connect.assert_awaited_once()

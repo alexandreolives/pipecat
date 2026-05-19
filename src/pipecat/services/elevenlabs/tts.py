@@ -192,8 +192,8 @@ class ElevenLabsTTSSettings(TTSSettings):
     Fields that appear in the WebSocket URL (``voice``, ``model``,
     ``language``) require a full reconnect when changed.  Fields that
     affect the voice character (``stability``, ``similarity_boost``,
-    ``style``, ``use_speaker_boost``, ``speed``) can be applied by closing
-    the current audio context so a new one is opened with updated settings.
+    ``style``, ``use_speaker_boost``, ``speed``) are session-scoped on the
+    ElevenLabs WebSocket API and therefore require a reconnect when changed.
 
     Parameters:
         stability: Voice stability control (0.0 to 1.0).
@@ -586,6 +586,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
 
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
+        self._voice_settings_sent = False
         self._pronunciation_dictionary_locators = _pronunciation_dictionary_locators
 
         self._cumulative_time = 0
@@ -654,13 +655,10 @@ class ElevenLabsTTSService(WebsocketTTSService):
         elif voice_settings_changed:
             logger.debug(
                 f"Voice settings changed ({changed.keys() & self.Settings.VOICE_SETTINGS_FIELDS}), "
-                f"closing current context to apply changes"
+                f"reconnecting WebSocket to apply session-scoped settings"
             )
-            audio_contexts = self.get_audio_contexts()
-            if audio_contexts:
-                for ctx_id in audio_contexts:
-                    await self._close_context(ctx_id)
-                    self._reset_alignment_state(ctx_id)
+            await self._disconnect()
+            await self._connect()
 
         if not url_changed:
             # Reconnect applies all settings; only warn about fields not handled
@@ -792,6 +790,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
         finally:
             await self.remove_active_audio_context()
             self._websocket = None
+            self._voice_settings_sent = False
             await self._call_event_handler("on_disconnected")
 
     def _get_websocket(self):
@@ -973,8 +972,9 @@ class ElevenLabsTTSService(WebsocketTTSService):
 
                     # Initialize context with voice settings and pronunciation dictionaries
                     msg: dict[str, Any] = {"text": " ", "context_id": context_id}
-                    if self._voice_settings:
+                    if self._voice_settings and not self._voice_settings_sent:
                         msg["voice_settings"] = self._voice_settings
+                        self._voice_settings_sent = True
                     if self._pronunciation_dictionary_locators:
                         msg["pronunciation_dictionary_locators"] = [
                             locator.model_dump()
