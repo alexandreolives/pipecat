@@ -396,6 +396,23 @@ class LLMContext:
         """
         self._messages.extend(messages)
 
+    def replace_message_at(self, index: int, message: LLMContextMessage):
+        """Replace the message at the given index.
+
+        Args:
+            index: Index of the message to replace.
+            message: Replacement message.
+        """
+        self._messages[index] = message
+
+    def remove_message_at(self, index: int):
+        """Remove the message at the given index.
+
+        Args:
+            index: Index of the message to remove.
+        """
+        del self._messages[index]
+
     def set_messages(self, messages: list[LLMContextMessage]):
         """Replace all messages in the context.
 

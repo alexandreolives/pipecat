@@ -12,6 +12,8 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    UserTurnInferenceCompletedFrame,
+    UserTurnInferenceTriggeredFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -21,7 +23,11 @@ from pipecat.turns.user_start.min_words_user_turn_start_strategy import (
 )
 from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy, deferred
 from pipecat.turns.user_turn_controller import UserTurnController
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
+from pipecat.turns.user_turn_strategies import (
+    DeepgramFluxUserTurnStrategies,
+    ExternalUserTurnStrategies,
+    UserTurnStrategies,
+)
 from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
 
 USER_TURN_STOP_TIMEOUT = 0.2
@@ -99,6 +105,39 @@ class TestUserTurnController(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(TRANSCRIPTION_TIMEOUT + 0.1)
 
         self.assertEqual(events, ["inference_triggered", "stopped"])
+
+    async def test_external_completion_frames_keep_turn_open_until_finalized(self):
+        controller = UserTurnController(
+            user_turn_strategies=DeepgramFluxUserTurnStrategies(),
+            user_turn_stop_timeout=USER_TURN_STOP_TIMEOUT,
+        )
+
+        await controller.setup(self.task_manager)
+
+        events: list[str] = []
+
+        @controller.event_handler("on_user_turn_started")
+        async def on_user_turn_started(controller, strategy, params):
+            events.append("started")
+
+        @controller.event_handler("on_user_turn_inference_triggered")
+        async def on_user_turn_inference_triggered(controller, strategy):
+            events.append("inference_triggered")
+
+        @controller.event_handler("on_user_turn_stopped")
+        async def on_user_turn_stopped(controller, strategy, params):
+            events.append("stopped")
+
+        await controller.process_frame(UserStartedSpeakingFrame())
+        self.assertTrue(controller.has_active_user_turn)
+
+        await controller.process_frame(UserTurnInferenceTriggeredFrame())
+        self.assertTrue(controller.has_active_user_turn)
+        self.assertEqual(events, ["started", "inference_triggered"])
+
+        await controller.process_frame(UserTurnInferenceCompletedFrame())
+        self.assertFalse(controller.has_active_user_turn)
+        self.assertEqual(events, ["started", "inference_triggered", "stopped"])
 
     async def test_deferred_wrapper_skips_stopped(self):
         """A deferred() wrapper drops the inner strategy's on_user_turn_stopped event."""

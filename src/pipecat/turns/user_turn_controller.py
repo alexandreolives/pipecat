@@ -279,6 +279,8 @@ class UserTurnController(BaseObject):
         await self._trigger_user_turn_start(strategy, params)
 
     async def _on_user_turn_inference_triggered(self, strategy: BaseUserTurnStopStrategy):
+        for stop_strategy in self._user_turn_strategies.stop or []:
+            await stop_strategy.mark_inference_triggered()
         await self._trigger_user_turn_inference_triggered(strategy)
 
     async def _on_user_turn_stopped(

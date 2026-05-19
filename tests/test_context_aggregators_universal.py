@@ -42,6 +42,8 @@ from pipecat.frames.frames import (
     UserMuteStartedFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    UserTurnInferenceCompletedFrame,
+    UserTurnInferenceTriggeredFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -65,6 +67,7 @@ from pipecat.turns.user_mute import (
 )
 from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import (
+    DeepgramFluxUserTurnStrategies,
     FilterIncompleteUserTurnStrategies,
     UserTurnStrategies,
 )
@@ -808,6 +811,55 @@ class TestLLMUserAggregator(unittest.IsolatedAsyncioTestCase):
 
         user_messages = [m for m in context.get_messages() if m.get("role") == "user"]
         self.assertEqual([m["content"] for m in user_messages], ["I'm thinking", "about pizza"])
+
+    async def test_flux_final_transcript_replaces_provisional_context(self):
+        """Flux provisional context should collapse to the final transcript at turn end."""
+        context = LLMContext()
+        user_aggregator = LLMUserAggregator(
+            context,
+            params=LLMUserAggregatorParams(
+                user_turn_strategies=DeepgramFluxUserTurnStrategies(),
+            ),
+        )
+
+        events: list[str] = []
+
+        @user_aggregator.event_handler("on_user_turn_inference_triggered")
+        async def on_inference_triggered(aggregator, strategy):
+            events.append("triggered")
+
+        @user_aggregator.event_handler("on_user_turn_stopped")
+        async def on_stopped(aggregator, strategy, message):
+            events.append(f"stopped:{message.content}")
+
+        pipeline = Pipeline([user_aggregator])
+
+        frames_to_send = [
+            UserStartedSpeakingFrame(),
+            TranscriptionFrame(
+                text="hello there",
+                user_id="cat",
+                timestamp="now",
+                finalized=False,
+            ),
+            SleepFrame(),
+            UserTurnInferenceTriggeredFrame(),
+            SleepFrame(),
+            TranscriptionFrame(
+                text="hello there friend",
+                user_id="cat",
+                timestamp="now",
+                finalized=True,
+            ),
+            SleepFrame(),
+            UserTurnInferenceCompletedFrame(),
+        ]
+        await run_test(pipeline, frames_to_send=frames_to_send)
+
+        self.assertEqual(events[0], "triggered")
+        self.assertEqual(events[-1], "stopped:hello there friend")
+        user_messages = [m for m in context.get_messages() if m.get("role") == "user"]
+        self.assertEqual([m["content"] for m in user_messages], ["hello there friend"])
 
 
 class TestLLMAssistantAggregator(unittest.IsolatedAsyncioTestCase):

@@ -1040,6 +1040,18 @@ class UserTurnInferenceCompletedFrame(SystemFrame):
 
 
 @dataclass
+class UserTurnInferenceTriggeredFrame(SystemFrame):
+    """Frame indicating that enough evidence exists to start LLM inference.
+
+    Emitted by external turn detectors that can identify a likely turn end
+    before the final completion signal arrives. Consumers should treat this as
+    a "start generating" signal, not as a final turn boundary.
+    """
+
+    pass
+
+
+@dataclass
 class VADUserStartedSpeakingFrame(SystemFrame):
     """Frame emitted when VAD definitively detects user started speaking.
 

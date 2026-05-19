@@ -59,7 +59,10 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
 
     - on_start_of_turn(service, transcript): Deepgram detected start of speech
     - on_end_of_turn(service, transcript): Deepgram detected end of turn (EOT)
-    - on_eager_end_of_turn(service, transcript): Deepgram predicted end of turn (EagerEOT)
+    - on_eager_end_of_turn(service, transcript): Deepgram predicted end of
+      turn (EagerEOT). The base service now emits a provisional
+      TranscriptionFrame plus an inference-trigger frame so the pipeline can
+      start responding early and confirm/cancel the response later.
     - on_turn_resumed(service): User resumed speaking after EagerEOT
 
     Example::

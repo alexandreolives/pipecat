@@ -16,6 +16,7 @@ from pipecat.turns.user_start import (
 )
 from pipecat.turns.user_stop import (
     BaseUserTurnStopStrategy,
+    ExternalUserTurnCompletionStopStrategy,
     ExternalUserTurnStopStrategy,
     LLMTurnCompletionUserTurnStopStrategy,
     TurnAnalyzerUserTurnStopStrategy,
@@ -98,6 +99,22 @@ class ExternalUserTurnStrategies(UserTurnStrategies):
     def __post_init__(self):
         self.start = [ExternalUserTurnStartStrategy()]
         self.stop = [ExternalUserTurnStopStrategy()]
+
+
+@dataclass
+class DeepgramFluxUserTurnStrategies(UserTurnStrategies):
+    """Turn strategy preset for Deepgram Flux.
+
+    Flux emits its own user-speaking frames and turn-completion markers, so
+    the preset uses the external start/stop strategies that understand the
+    eager-inference + finalization split.
+    """
+
+    def __post_init__(self):
+        self.start = [ExternalUserTurnStartStrategy(enable_interruptions=True)]
+        self.stop = [
+            ExternalUserTurnCompletionStopStrategy(enable_user_speaking_frames=False)
+        ]
 
 
 @dataclass

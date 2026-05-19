@@ -19,11 +19,12 @@ from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
-    InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    UserTurnInferenceCompletedFrame,
+    UserTurnInferenceTriggeredFrame,
 )
 from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, assert_given
 from pipecat.services.stt_service import STTService
@@ -197,6 +198,8 @@ class DeepgramFluxSTTBase(STTService):
         self._watchdog_task: asyncio.Task | None = None
         self._user_is_speaking = False
         self._last_audio_chunk_duration: float = 0.0
+        self._eager_eot_transcript: str | None = None
+        self._eager_eot_interruption_sent = False
 
         # Flux event handlers
         self._register_event_handler("on_start_of_turn")
@@ -589,6 +592,8 @@ class DeepgramFluxSTTBase(STTService):
         """
         logger.debug("User started speaking")
         self._user_is_speaking = True
+        self._eager_eot_transcript = None
+        self._eager_eot_interruption_sent = False
         await self.broadcast_frame(UserStartedSpeakingFrame)
         if self._should_interrupt:
             await self.broadcast_interruption()
@@ -601,13 +606,18 @@ class DeepgramFluxSTTBase(STTService):
         """Handle TurnResumed events from Deepgram Flux.
 
         TurnResumed events indicate that speech has resumed after a brief pause
-        within the same turn. This is primarily used for logging and debugging
-        purposes and doesn't trigger any significant processing changes.
+        within the same turn. If an eager response was already started, this
+        interrupts the in-flight response so the user can keep talking without
+        the bot talking over them.
 
         Args:
             event: The event type string for logging purposes.
         """
         logger.trace(f"Received event TurnResumed: {event}")
+        if self._should_interrupt and self._eager_eot_transcript and not self._eager_eot_interruption_sent:
+            logger.debug("TurnResumed after EagerEndOfTurn - interrupting in-flight bot response")
+            await self.broadcast_interruption()
+            self._eager_eot_interruption_sent = True
         await self._call_event_handler("on_turn_resumed")
 
     def _calculate_average_confidence(self, transcript_data) -> float | None:
@@ -660,6 +670,9 @@ class DeepgramFluxSTTBase(STTService):
         """
         logger.debug("User stopped speaking")
         self._user_is_speaking = False
+        eager_transcript = self._eager_eot_transcript
+        self._eager_eot_transcript = None
+        self._eager_eot_interruption_sent = False
 
         # Compute the average confidence
         average_confidence = self._calculate_average_confidence(data)
@@ -671,18 +684,22 @@ class DeepgramFluxSTTBase(STTService):
         if not min_confidence or (
             average_confidence is not None and average_confidence > min_confidence
         ):
-            # EndOfTurn means Flux has determined the turn is complete,
-            # so this TranscriptionFrame is always finalized
-            await self.push_frame(
-                TranscriptionFrame(
-                    transcript,
-                    self._user_id,
-                    time_now_iso8601(),
-                    detected_language,
-                    result=data,
-                    finalized=True,
+            # EndOfTurn means Flux has determined the turn is complete.
+            # Emit the authoritative final transcript so downstream
+            # aggregators can reconcile any earlier provisional turn
+            # fragments into the final turn text.
+            if transcript:
+                await self.push_frame(
+                    TranscriptionFrame(
+                        transcript,
+                        self._user_id,
+                        time_now_iso8601(),
+                        detected_language,
+                        result=data,
+                        finalized=True,
+                    )
                 )
-            )
+            await self.push_frame(UserTurnInferenceCompletedFrame())
         else:
             logger.warning(
                 f"Transcription confidence below min_confidence threshold: {average_confidence}"
@@ -710,32 +727,30 @@ class DeepgramFluxSTTBase(STTService):
             data: The TurnInfo message data containing event type, transcript and some extra metadata.
         """
         logger.trace(f"EagerEndOfTurn - {transcript}")
-        # Deepgram's EagerEndOfTurn feature enables lower-latency voice agents by sending
-        # medium-confidence transcripts before EndOfTurn certainty, allowing LLM processing to
-        # begin early.
-        #
-        # However, if speech resumes or the transcripts differ from the final EndOfTurn, the
-        # EagerEndOfTurn response should be cancelled to avoid incorrect or partial responses.
-        #
-        # Pipecat doesn't yet provide built-in Gate/control mechanisms to:
-        # 1. Start LLM/TTS processing early on EagerEndOfTurn events
-        # 2. Cancel in-flight processing when TurnResumed occurs
-        #
-        # By pushing EagerEndOfTurn transcripts as InterimTranscriptionFrame, we enable
-        # developers to implement custom EagerEndOfTurn handling in their applications while
-        # maintaining compatibility with existing interim transcription workflows.
-        #
-        # TODO: Implement proper EagerEndOfTurn support with cancellable processing pipeline
-        # that can start response generation on EagerEndOfTurn and cancel or confirm it.
-        await self.push_frame(
-            InterimTranscriptionFrame(
-                transcript,
-                self._user_id,
-                time_now_iso8601(),
-                self._primary_detected_language(data),
-                result=data,
+        # EagerEndOfTurn means Flux has produced a likely-final transcript.
+        # We surface it as a provisional TranscriptionFrame so the user
+        # aggregator can begin inference early. The inference-trigger frame is
+        # only emitted when the eager transcript clears the confidence gate so
+        # low-confidence partials do not start LLM/tool execution too early.
+        self._eager_eot_transcript = transcript
+        self._eager_eot_interruption_sent = False
+        if transcript.strip():
+            await self.push_frame(
+                TranscriptionFrame(
+                    transcript,
+                    self._user_id,
+                    time_now_iso8601(),
+                    self._primary_detected_language(data),
+                    result=data,
+                    finalized=False,
+                )
             )
-        )
+        average_confidence = self._calculate_average_confidence(data)
+        min_confidence = assert_given(self._settings.min_confidence)
+        if not min_confidence or (
+            average_confidence is not None and average_confidence > min_confidence
+        ):
+            await self.push_frame(UserTurnInferenceTriggeredFrame())
         await self._call_event_handler("on_eager_end_of_turn", transcript)
 
     async def _handle_update(self, transcript: str):

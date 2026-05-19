@@ -28,7 +28,7 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+from pipecat.turns.user_turn_strategies import DeepgramFluxUserTurnStrategies
 
 load_dotenv(override=True)
 
@@ -79,7 +79,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            user_turn_strategies=ExternalUserTurnStrategies(),
+            user_turn_strategies=DeepgramFluxUserTurnStrategies(),
             vad_analyzer=SileroVADAnalyzer(),
         ),
     )

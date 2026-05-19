@@ -97,6 +97,15 @@ class BaseUserTurnStopStrategy(BaseObject):
         """
         pass
 
+    async def mark_inference_triggered(self):
+        """Record that a user-turn inference trigger already fired.
+
+        Strategies that gate finalization on an external completion signal can
+        use this hook to avoid re-emitting an inference trigger when the
+        completion frame eventually arrives.
+        """
+        pass
+
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         """Emit on_push_frame to push a frame using the user aggreagtor.
 

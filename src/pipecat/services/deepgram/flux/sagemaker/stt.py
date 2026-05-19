@@ -59,7 +59,8 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
     - on_connection_error: Called on connection failure
     - on_start_of_turn: Deepgram Flux detected start of speech
     - on_end_of_turn: Deepgram Flux detected end of turn
-    - on_eager_end_of_turn: Deepgram Flux predicted end of turn
+    - on_eager_end_of_turn: Deepgram Flux predicted end of turn and emits a
+      provisional transcript plus an inference trigger
     - on_turn_resumed: User resumed speaking after EagerEndOfTurn
     - on_update: Interim transcript update during a turn
 
