@@ -111,9 +111,15 @@ class DeepgramFluxUserTurnStrategies(UserTurnStrategies):
     """
 
     def __post_init__(self):
-        self.start = [ExternalUserTurnStartStrategy(enable_interruptions=True)]
+        self.start = [
+            VADUserTurnStartStrategy(),
+            ExternalUserTurnStartStrategy(enable_interruptions=True),
+        ]
         self.stop = [
-            ExternalUserTurnCompletionStopStrategy(enable_user_speaking_frames=False)
+            ExternalUserTurnCompletionStopStrategy(
+                complete_on_user_stopped_speaking=False,
+                enable_user_speaking_frames=False,
+            )
         ]
 
 

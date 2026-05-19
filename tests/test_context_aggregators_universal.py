@@ -65,6 +65,7 @@ from pipecat.turns.user_mute import (
     FunctionCallUserMuteStrategy,
     MuteUntilFirstBotCompleteUserMuteStrategy,
 )
+from pipecat.turns.user_start import VADUserTurnStartStrategy
 from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import (
     DeepgramFluxUserTurnStrategies,
@@ -856,10 +857,82 @@ class TestLLMUserAggregator(unittest.IsolatedAsyncioTestCase):
         ]
         await run_test(pipeline, frames_to_send=frames_to_send)
 
-        self.assertEqual(events[0], "triggered")
-        self.assertEqual(events[-1], "stopped:hello there friend")
+        self.assertEqual(events, ["triggered", "stopped:hello there friend"])
         user_messages = [m for m in context.get_messages() if m.get("role") == "user"]
         self.assertEqual([m["content"] for m in user_messages], ["hello there friend"])
+
+    async def test_flux_final_transcript_replaces_provisional_after_context_append(self):
+        """Flux replacement should target the provisional message, not a later append."""
+        context = LLMContext()
+        user_aggregator = LLMUserAggregator(
+            context,
+            params=LLMUserAggregatorParams(
+                user_turn_strategies=DeepgramFluxUserTurnStrategies(),
+            ),
+        )
+
+        pipeline = Pipeline([user_aggregator])
+
+        frames_to_send = [
+            UserStartedSpeakingFrame(),
+            TranscriptionFrame(
+                text="hello there",
+                user_id="cat",
+                timestamp="now",
+                finalized=False,
+            ),
+            SleepFrame(),
+            UserTurnInferenceTriggeredFrame(),
+            SleepFrame(),
+            LLMMessagesAppendFrame(messages=[{"role": "system", "content": "keep me"}]),
+            TranscriptionFrame(
+                text="hello there friend",
+                user_id="cat",
+                timestamp="now",
+                finalized=True,
+            ),
+            SleepFrame(),
+            UserTurnInferenceCompletedFrame(),
+        ]
+        await run_test(pipeline, frames_to_send=frames_to_send)
+
+        self.assertEqual(
+            context.get_messages(),
+            [
+                {"role": "user", "content": "hello there friend"},
+                {"role": "system", "content": "keep me"},
+            ],
+        )
+
+    async def test_finalized_non_flux_transcriptions_still_accumulate_segments(self):
+        """Finalized STT frames should not collapse non-provisional user turns."""
+        context = LLMContext()
+        user_aggregator = LLMUserAggregator(
+            context,
+            params=LLMUserAggregatorParams(
+                user_turn_strategies=UserTurnStrategies(
+                    start=[VADUserTurnStartStrategy()],
+                    stop=[
+                        SpeechTimeoutUserTurnStopStrategy(
+                            user_speech_timeout=TRANSCRIPTION_TIMEOUT
+                        )
+                    ],
+                ),
+            ),
+        )
+
+        pipeline = Pipeline([user_aggregator])
+        frames_to_send = [
+            VADUserStartedSpeakingFrame(),
+            TranscriptionFrame(text="hello", user_id="cat", timestamp="now", finalized=True),
+            TranscriptionFrame(text="there", user_id="cat", timestamp="now", finalized=True),
+            VADUserStoppedSpeakingFrame(),
+            SleepFrame(sleep=TRANSCRIPTION_TIMEOUT + 0.1),
+        ]
+        await run_test(pipeline, frames_to_send=frames_to_send)
+
+        user_messages = [m for m in context.get_messages() if m.get("role") == "user"]
+        self.assertEqual([m["content"] for m in user_messages], ["hello there"])
 
 
 class TestLLMAssistantAggregator(unittest.IsolatedAsyncioTestCase):

@@ -621,6 +621,7 @@ class LLMUserAggregator(LLMContextAggregator):
         # provisional messages that can be rewritten with the authoritative
         # final transcript when the STT service emits one.
         self._user_turn_context_message_indexes: list[int] = []
+        self._user_turn_context_message_refs: list[LLMContextMessage] = []
         # Last finalized transcript received for the current turn, if any.
         self._user_turn_final_transcript: str | None = None
 
@@ -825,11 +826,13 @@ class LLMUserAggregator(LLMContextAggregator):
             await self.push_context_frame()
 
     async def _handle_llm_messages_update(self, frame: LLMMessagesUpdateFrame):
+        self._clear_user_turn_context_message_refs()
         self.set_messages(frame.messages)
         if frame.run_llm:
             await self.push_context_frame()
 
     async def _handle_llm_messages_transform(self, frame: LLMMessagesTransformFrame):
+        self._clear_user_turn_context_message_refs()
         self.transform_messages(frame.transform)
         if frame.run_llm:
             await self.push_context_frame()
@@ -856,7 +859,7 @@ class LLMUserAggregator(LLMContextAggregator):
         # Finalized transcriptions are authoritative. Replace the current
         # aggregation buffer with the final text instead of appending the
         # finalized transcript after any provisional segments.
-        if frame.finalized:
+        if frame.finalized and self._user_turn_context_message_refs:
             self._user_turn_final_transcript = frame.text
             await self.reset()
             if frame.text.strip():
@@ -928,7 +931,7 @@ class LLMUserAggregator(LLMContextAggregator):
 
         self._user_turn_start_timestamp = time_now_iso8601()
         self._full_user_turn_aggregation = None
-        self._user_turn_context_message_indexes = []
+        self._clear_user_turn_context_message_refs()
         self._user_turn_final_transcript = None
 
         if params.enable_user_speaking_frames:
@@ -963,6 +966,7 @@ class LLMUserAggregator(LLMContextAggregator):
             else:
                 self._full_user_turn_aggregation = segment
             self._user_turn_context_message_indexes.append(len(self._context.get_messages()) - 1)
+            self._user_turn_context_message_refs.append(self._context.get_messages()[-1])
 
         await self._call_event_handler("on_user_turn_inference_triggered", strategy)
 
@@ -1016,13 +1020,17 @@ class LLMUserAggregator(LLMContextAggregator):
 
         if finalized_transcript is not None:
             if self._user_turn_context_message_indexes:
-                first_index = self._user_turn_context_message_indexes[0]
-                self._context.replace_message_at(
-                    first_index, {"role": self.role, "content": finalized_transcript}
-                )
-                for index in reversed(self._user_turn_context_message_indexes[1:]):
-                    self._context.remove_message_at(index)
-                self._user_turn_context_message_indexes = []
+                resolved_indexes = self._resolve_user_turn_context_message_indexes()
+                if resolved_indexes:
+                    first_index = resolved_indexes[0]
+                    self._context.replace_message_at(
+                        first_index, {"role": self.role, "content": finalized_transcript}
+                    )
+                    for index in reversed(resolved_indexes[1:]):
+                        self._context.remove_message_at(index)
+                else:
+                    segment = await self.push_aggregation()
+                self._clear_user_turn_context_message_refs()
                 await self.reset()
             else:
                 segment = await self.push_aggregation()
@@ -1037,7 +1045,7 @@ class LLMUserAggregator(LLMContextAggregator):
 
         self._full_user_turn_aggregation = None
         self._user_turn_final_transcript = None
-        self._user_turn_context_message_indexes = []
+        self._clear_user_turn_context_message_refs()
 
         if not on_session_end or content:
             message = UserTurnStoppedMessage(
@@ -1045,6 +1053,25 @@ class LLMUserAggregator(LLMContextAggregator):
             )
             await self._call_event_handler("on_user_turn_stopped", strategy, message)
             self._user_turn_start_timestamp = ""
+
+    def _clear_user_turn_context_message_refs(self):
+        self._user_turn_context_message_indexes = []
+        self._user_turn_context_message_refs = []
+
+    def _resolve_user_turn_context_message_indexes(self) -> list[int]:
+        messages = self._context.get_messages()
+        resolved: list[int] = []
+        for fallback_index, message_ref in zip(
+            self._user_turn_context_message_indexes, self._user_turn_context_message_refs
+        ):
+            index = next((i for i, message in enumerate(messages) if message is message_ref), None)
+            if index is None:
+                if fallback_index < len(messages) and messages[fallback_index] is message_ref:
+                    index = fallback_index
+                else:
+                    continue
+            resolved.append(index)
+        return resolved
 
 
 class LLMAssistantAggregator(LLMContextAggregator):

@@ -614,7 +614,7 @@ class DeepgramFluxSTTBase(STTService):
             event: The event type string for logging purposes.
         """
         logger.trace(f"Received event TurnResumed: {event}")
-        if self._should_interrupt and self._eager_eot_transcript and not self._eager_eot_interruption_sent:
+        if self._eager_eot_transcript and not self._eager_eot_interruption_sent:
             logger.debug("TurnResumed after EagerEndOfTurn - interrupting in-flight bot response")
             await self.broadcast_interruption()
             self._eager_eot_interruption_sent = True
@@ -670,7 +670,6 @@ class DeepgramFluxSTTBase(STTService):
         """
         logger.debug("User stopped speaking")
         self._user_is_speaking = False
-        eager_transcript = self._eager_eot_transcript
         self._eager_eot_transcript = None
         self._eager_eot_interruption_sent = False
 
@@ -700,12 +699,12 @@ class DeepgramFluxSTTBase(STTService):
                     )
                 )
             await self.push_frame(UserTurnInferenceCompletedFrame())
+            await self._handle_transcription(transcript, True, detected_language)
         else:
             logger.warning(
                 f"Transcription confidence below min_confidence threshold: {average_confidence}"
             )
 
-        await self._handle_transcription(transcript, True, detected_language)
         await self.stop_processing_metrics()
         await self.broadcast_frame(UserStoppedSpeakingFrame)
         await self._call_event_handler("on_end_of_turn", transcript)
@@ -732,25 +731,29 @@ class DeepgramFluxSTTBase(STTService):
         # aggregator can begin inference early. The inference-trigger frame is
         # only emitted when the eager transcript clears the confidence gate so
         # low-confidence partials do not start LLM/tool execution too early.
-        self._eager_eot_transcript = transcript
-        self._eager_eot_interruption_sent = False
-        if transcript.strip():
-            await self.push_frame(
-                TranscriptionFrame(
-                    transcript,
-                    self._user_id,
-                    time_now_iso8601(),
-                    self._primary_detected_language(data),
-                    result=data,
-                    finalized=False,
-                )
-            )
         average_confidence = self._calculate_average_confidence(data)
         min_confidence = assert_given(self._settings.min_confidence)
         if not min_confidence or (
             average_confidence is not None and average_confidence > min_confidence
         ):
+            self._eager_eot_transcript = transcript
+            self._eager_eot_interruption_sent = False
+            if transcript.strip():
+                await self.push_frame(
+                    TranscriptionFrame(
+                        transcript,
+                        self._user_id,
+                        time_now_iso8601(),
+                        self._primary_detected_language(data),
+                        result=data,
+                        finalized=False,
+                    )
+                )
             await self.push_frame(UserTurnInferenceTriggeredFrame())
+        else:
+            logger.warning(
+                f"Eager transcription confidence below min_confidence threshold: {average_confidence}"
+            )
         await self._call_event_handler("on_eager_end_of_turn", transcript)
 
     async def _handle_update(self, transcript: str):

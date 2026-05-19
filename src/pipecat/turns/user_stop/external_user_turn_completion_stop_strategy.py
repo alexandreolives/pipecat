@@ -57,8 +57,18 @@ class ExternalUserTurnCompletionStopStrategy(BaseUserTurnStopStrategy):
     respond.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, *, complete_on_user_stopped_speaking: bool = True, **kwargs):
+        """Initialize the external completion strategy.
+
+        Args:
+            complete_on_user_stopped_speaking: Treat ``UserStoppedSpeakingFrame`` as
+                a legacy completion signal. Disable this when the producer emits
+                explicit ``UserTurnInferenceCompletedFrame`` frames, otherwise a
+                speaking-state frame can finalize an unconfirmed turn.
+            **kwargs: Additional keyword arguments.
+        """
         super().__init__(**kwargs)
+        self._complete_on_user_stopped_speaking = complete_on_user_stopped_speaking
         self._inference_triggered = False
         self._turn_finalized = False
 
@@ -73,7 +83,11 @@ class ExternalUserTurnCompletionStopStrategy(BaseUserTurnStopStrategy):
             await self._trigger_inference_once()
             return ProcessFrameResult.CONTINUE
 
-        if isinstance(frame, (UserTurnInferenceCompletedFrame, UserStoppedSpeakingFrame)):
+        if isinstance(frame, UserTurnInferenceCompletedFrame):
+            await self._trigger_completion()
+            return ProcessFrameResult.STOP
+
+        if isinstance(frame, UserStoppedSpeakingFrame) and self._complete_on_user_stopped_speaking:
             await self._trigger_completion()
             return ProcessFrameResult.STOP
 
