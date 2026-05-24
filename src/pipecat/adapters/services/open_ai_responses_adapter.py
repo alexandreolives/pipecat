@@ -9,13 +9,18 @@
 from typing import Any, Required, TypedDict, cast
 
 from openai._types import NotGiven as OpenAINotGiven
-from openai.types.responses import FunctionToolParam, ResponseInputItemParam, ToolParam
+from openai.types.responses import (
+    FunctionToolParam,
+    ResponseInputItemParam,
+    ToolParam,
+)
 
 from pipecat.adapters.base_llm_adapter import BaseLLMAdapter
 from pipecat.adapters.schemas.tools_schema import AdapterType, ToolsSchema
 from pipecat.processors.aggregators.llm_context import (
     LLMContext,
     LLMContextMessage,
+    is_given,
     LLMSpecificMessage,
 )
 
@@ -28,6 +33,7 @@ class OpenAIResponsesLLMInvocationParams(TypedDict, total=False):
     input: Required[list[ResponseInputItemParam]]
     tools: Required[list[ToolParam] | OpenAINotGiven]
     instructions: str
+    tool_choice: Any
 
 
 class OpenAIResponsesLLMAdapter(BaseLLMAdapter[OpenAIResponsesLLMInvocationParams]):
@@ -81,6 +87,9 @@ class OpenAIResponsesLLMAdapter(BaseLLMAdapter[OpenAIResponsesLLMInvocationParam
             "input": input_items,
             "tools": self.from_standard_tools(context.tools),
         }
+
+        if is_given(context.tool_choice):
+            params["tool_choice"] = cast(Any, context.tool_choice)
 
         if system_instruction:
             # Compatibility: The Responses API requires at least one input

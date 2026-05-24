@@ -271,6 +271,10 @@ class _BaseOpenAIResponsesLLMService(LLMService[OpenAIResponsesLLMAdapter]):
         if tools is not None and not isinstance(tools, type(NOT_GIVEN)):
             params["tools"] = tools
 
+        tool_choice = invocation_params.get("tool_choice")
+        if tool_choice is not None and not isinstance(tool_choice, type(NOT_GIVEN)):
+            params["tool_choice"] = tool_choice
+
         # Extra settings
         params.update(self._settings.extra)
 
