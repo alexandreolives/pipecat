@@ -58,14 +58,12 @@ except ModuleNotFoundError as e:
     logger.error("In order to use ElevenLabs, you need to `pip install pipecat-ai[elevenlabs]`.")
     raise Exception(f"Missing module: {e}")
 
-# Models that support language codes
-# The following models are excluded as they don't support language codes:
-# - eleven_flash_v2
-# - eleven_turbo_v2
-# - eleven_multilingual_v2
+# Models that support language codes.
+# Older non-multilingual variants are excluded.
 ELEVENLABS_MULTILINGUAL_MODELS = {
     "eleven_flash_v2_5",
     "eleven_turbo_v2_5",
+    "eleven_multilingual_v2",
 }
 
 
