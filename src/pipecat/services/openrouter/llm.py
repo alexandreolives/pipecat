@@ -109,6 +109,14 @@ class OpenRouterLLMService(OpenAILLMService):
             Transformed parameters ready for the API call.
         """
         params = super().build_chat_completion_params(params_from_context)
+        reasoning = params.pop("reasoning", None)
+        if reasoning is not None:
+            extra_body = params.get("extra_body")
+            if isinstance(extra_body, dict):
+                params["extra_body"] = {**extra_body, "reasoning": reasoning}
+            else:
+                params["extra_body"] = {"reasoning": reasoning}
+
         model = assert_given(self._settings.model)
         if model is not None and "gemini" in model.lower():
             messages = params.get("messages", [])
