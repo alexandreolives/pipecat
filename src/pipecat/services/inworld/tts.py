@@ -303,15 +303,6 @@ class InworldHttpTTSService(TTSService):
         """
         return language_to_inworld_language(language)
 
-    async def start(self, frame: StartFrame):
-        """Start the Inworld TTS service.
-
-        Args:
-            frame: The start frame.
-        """
-        await super().start(frame)
-        self._audio_sample_rate = self.sample_rate
-
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         """Push a frame and handle state changes.
 
