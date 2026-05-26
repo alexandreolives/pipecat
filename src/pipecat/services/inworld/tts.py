@@ -159,7 +159,7 @@ class InworldHttpTTSService(TTSService):
         self,
         *,
         api_key: str,
-        aiohttp_session: aiohttp.ClientSession,
+        aiohttp_session: aiohttp.ClientSession | None = None,
         voice_id: str | None = None,
         model: str | None = None,
         streaming: bool = True,
@@ -243,6 +243,7 @@ class InworldHttpTTSService(TTSService):
 
         self._api_key = api_key
         self._session = aiohttp_session
+        self._owns_session = aiohttp_session is None
         self._streaming = streaming
         self._timestamp_type = "WORD"
 
@@ -258,6 +259,30 @@ class InworldHttpTTSService(TTSService):
         self._audio_encoding = encoding
         self._audio_sample_rate = 0  # Set in start()
         self._timestamp_transport_strategy = timestamp_transport_strategy
+
+    async def start(self, frame: StartFrame):
+        """Start the Inworld HTTP TTS service."""
+        await super().start(frame)
+        self._audio_sample_rate = self.sample_rate
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+            self._owns_session = True
+
+    async def stop(self, frame: EndFrame):
+        """Stop the Inworld HTTP TTS service."""
+        await super().stop(frame)
+        await self._close_session()
+
+    async def cancel(self, frame: CancelFrame):
+        """Cancel the Inworld HTTP TTS service."""
+        await super().cancel(frame)
+        await self._close_session()
+
+    async def _close_session(self):
+        if self._owns_session and self._session and not self._session.closed:
+            await self._session.close()
+        if self._owns_session:
+            self._session = None
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -347,6 +372,10 @@ class InworldHttpTTSService(TTSService):
         logger.debug(f"{self}: Generating TTS [{text}] (streaming={self._streaming})")
 
         self._current_run_had_timestamps = False
+
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+            self._owns_session = True
 
         audio_config = {
             "audioEncoding": self._audio_encoding,
